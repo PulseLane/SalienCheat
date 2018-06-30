@@ -71,7 +71,7 @@ if( isset( $_SERVER[ 'IGNORE_UPDATES' ] ) && (bool)$_SERVER[ 'IGNORE_UPDATES' ] 
 }
 else
 {
-	$UpdateCheck = true;
+	$UpdateCheck = false;
 	$RepositoryScriptETag = '';
 	$RepositoryScriptHash = GetRepositoryScriptHash( $RepositoryScriptETag, $LocalScriptHash );
 }
