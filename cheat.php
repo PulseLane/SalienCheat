@@ -191,12 +191,14 @@ do
 		sleep( 4 );
 
 		$BossFailsAllowed = 10;
-		$NextHeal = microtime( true ) + mt_rand( 120, 180 );
+		$NextHeal = PHP_INT_MAX;
+		$WaitingForPlayers = true;
+		$MyScoreInBoss = 0;
 
 		do
 		{
 			$UseHeal = 0;
-			$DamageToBoss = 1;
+			$DamageToBoss = $WaitingForPlayers ? 0 : 1;
 			$DamageTaken = 0;
 
 			if( microtime( true ) >= $NextHeal )
@@ -229,6 +231,18 @@ do
 				break;
 			}
 
+			if( $Data[ 'response' ][ 'waiting_for_players' ] )
+			{
+				$WaitingForPlayers = true;
+				Msg( '{green}@@ Waiting for players...' );
+				continue;
+			}
+			else if( $WaitingForPlayers )
+			{
+				$WaitingForPlayers = false;
+				$NextHeal = microtime( true ) + mt_rand( 0, 120 );
+			}
+
 			if( empty( $Data[ 'response' ][ 'boss_status' ] ) )
 			{
 				Msg( '{green}@@ Waiting...' );
@@ -238,7 +252,7 @@ do
 			// Strip names down to basic ASCII.
 			$RegMask = '/[\x00-\x1F\x7F-\xFF]/';
 
-			usort( $Data[ 'response' ][ 'boss_status' ][ 'boss_players' ], function( $a, $b ) use ( $AccountID, $RegMask )
+			usort( $Data[ 'response' ][ 'boss_status' ][ 'boss_players' ], function( $a, $b ) use( $AccountID )
 			{
 				if( $a[ 'accountid' ] == $AccountID )
 				{
@@ -249,7 +263,7 @@ do
 					return -1;
 				}
 
-				return strcmp( preg_replace( $RegMask, '', $a['name'] ), preg_replace( $RegMask, '', $b['name'] ) );
+				return $b[ 'accountid' ] - $a[ 'accountid' ];
 			} );
 
 			$MyPlayer = null;
@@ -264,12 +278,14 @@ do
 					$MyPlayer = $Player;
 				}
 
+				$Name = trim( preg_replace( $RegMask, '', $Player[ 'name' ] ) );
+
 				Msg(
 					( $IsThisMe ? '{green}@@' : '  ' ) .
 					' %-20s - HP: {yellow}%6s' . $DefaultColor  . ' / %6s - XP Gained: {yellow}%10s' . $DefaultColor,
 					PHP_EOL,
 					[
-						substr( preg_replace( $RegMask, '', $Player[ 'name' ] ), 0, 20 ),
+						empty( $Name ) ? ( '[U:1:' . $Player[ 'accountid' ] . ']' ) : substr( $Name, 0, 20 ),
 						$Player[ 'hp' ],
 						$Player[ 'max_hp' ],
 						number_format( $Player[ 'xp_earned' ] )
@@ -287,15 +303,11 @@ do
 				break;
 			}
 
-			if( $Data[ 'response' ][ 'waiting_for_players' ] )
-			{
-				Msg( '{green}@@ Waiting for players...' );
-				continue;
-			}
-
 			if( $MyPlayer !== null )
 			{
-				Msg( '@@ Started XP: ' . number_format( $MyPlayer[ 'score_on_join' ] ) . ' {teal}(L' . $MyPlayer[ 'level_on_join' ] . '){normal} - Current XP: {yellow}' . number_format( $MyPlayer[ 'score_on_join' ] + $MyPlayer[ 'xp_earned' ] ) . ' ' . ( $MyPlayer[ 'level_on_join' ] != $MyPlayer[ 'new_level' ] ? '{green}' : '{teal}' ) . '(L' . $MyPlayer[ 'new_level' ] . ')' );
+				$MyScoreInBoss = $MyPlayer[ 'score_on_join' ] + $MyPlayer[ 'xp_earned' ];
+
+				Msg( '@@ Started XP: ' . number_format( $MyPlayer[ 'score_on_join' ] ) . ' {teal}(L' . $MyPlayer[ 'level_on_join' ] . '){normal} - Current XP: {yellow}' . number_format( $MyScoreInBoss ) . ' ' . ( $MyPlayer[ 'level_on_join' ] != $MyPlayer[ 'new_level' ] ? '{green}' : '{teal}' ) . '(L' . $MyPlayer[ 'new_level' ] . ')' );
 			}
 
 			Msg( '@@ Boss HP: {green}' . number_format( $Data[ 'response' ][ 'boss_status' ][ 'boss_hp' ] ) . '{normal} / {lightred}' .  number_format( $Data[ 'response' ][ 'boss_status' ][ 'boss_max_hp' ] ) . '{normal} - Lasers: {yellow}' . $Data[ 'response' ][ 'num_laser_uses' ] . '{normal} - Team Heals: {green}' . $Data[ 'response' ][ 'num_team_heals' ] );
@@ -303,6 +315,24 @@ do
 			echo PHP_EOL;
 		}
 		while( BossSleep( $c ) );
+
+		$Data = SendPOST( 'ITerritoryControlMinigameService/GetPlayerInfo', 'access_token=' . $Token );
+
+		if( isset( $Data[ 'response' ][ 'score' ] ) )
+		{
+			Msg(
+				'++ Your Score after Boss battle: {lightred}' . number_format( $MyScoreInBoss ) .
+				'{yellow} (+' . number_format( $MyScoreInBoss - $OldScore ) . ')' .
+				'{normal} - Level: {green}' . $Data[ 'response' ][ 'level' ]
+			);
+
+			$OldScore = $MyScoreInBoss;
+		}
+
+		if( isset( $Data[ 'response' ][ 'active_boss_game' ] ) )
+		{
+			SendPOST( 'IMiniGameService/LeaveGame', 'access_token=' . $Token . '&gameid=' . $Data[ 'response' ][ 'active_boss_game' ] );
+		}
 
 		continue;
 	}
@@ -410,20 +440,23 @@ do
 		);
 
 		$OldScore = $Data[ 'new_score' ];
-		$WaitTimeSeconds = $WaitTime / 60;
-		$Time = ( ( $Data[ 'next_level_score' ] - $Data[ 'new_score' ] ) / GetScoreForZone( [ 'difficulty' => $Zone[ 'difficulty' ] ] ) * $WaitTimeSeconds ) + $WaitTimeSeconds;
-		$Hours = floor( $Time / 60 );
-		$Minutes = $Time % 60;
-		$Date = date_create();
 
-		date_add( $Date, date_interval_create_from_date_string( $Hours . " hours + " . $Minutes . " minutes" ) );
+		if( isset( $Data[ 'next_level_score' ] ) )
+		{
+			$WaitTimeSeconds = $WaitTime / 60;
+			$Time = ( ( $Data[ 'next_level_score' ] - $Data[ 'new_score' ] ) / GetScoreForZone( [ 'difficulty' => $Zone[ 'difficulty' ] ] ) * $WaitTimeSeconds ) + $WaitTimeSeconds;
+			$Hours = floor( $Time / 60 );
+			$Minutes = $Time % 60;
+			$Date = date_create();
 
-		Msg(
-			'>> Next Level: {yellow}' . number_format( $Data[ 'next_level_score' ] ) .
-			'{normal} - Remaining: {yellow}' . number_format( $Data[ 'next_level_score' ] - $Data[ 'new_score' ] ) .
-			'{normal} - ETA: {green}' . $Hours . 'h ' . $Minutes . 'm (' . date_format( $Date , "jS H:i T" ) . ')'
-		);
+			date_add( $Date, date_interval_create_from_date_string( $Hours . " hours + " . $Minutes . " minutes" ) );
 
+			Msg(
+				'>> Next Level: {yellow}' . number_format( $Data[ 'next_level_score' ] ) .
+				'{normal} - Remaining: {yellow}' . number_format( $Data[ 'next_level_score' ] - $Data[ 'new_score' ] ) .
+				'{normal} - ETA: {green}' . $Hours . 'h ' . $Minutes . 'm (' . date_format( $Date , "jS H:i T" ) . ')'
+			);
+		}
 		if( $Data[ 'new_level' ] > 25 )
 		{
 			$RandomizeZone = 1;
@@ -460,6 +493,11 @@ function CheckGameVersion( $Data )
 
 function GetNextLevelProgress( $Data )
 {
+	if( !isset( $Data[ 'next_level_score' ] ) )
+	{
+		return 1;
+	}
+
 	$ScoreTable =
 	[
 		0,       // Level 1
@@ -638,6 +676,12 @@ function GetBestPlanetAndZone( $RandomizeZone, $WaitTime, $FailSleep )
 
 	if( empty( $Planets[ 'response' ][ 'planets' ] ) )
 	{
+		if( isset( $Planets[ 'response' ][ 'game_version' ] ) )
+		{
+			Msg( '{green}There are no active planets left! Good game!' );
+			exit( 0 );
+		}
+
 		return null;
 	}
 
